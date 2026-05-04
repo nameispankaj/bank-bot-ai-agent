@@ -1,106 +1,166 @@
-# Bank Bot – Mini Banking Console App (C#)
+# Bank Bot (C#) – Mini Banking + Azure AI Console Assistant
 
-A small C# console “banking assistant” that supports basic banking commands (login, balance, deposit, withdraw, logout) and routes non-banking prompts to an Azure AI Agent.
+Bank Bot is a C# console mini-project that supports **banking operations** (login, balance, deposit, withdraw, logout) and uses **Azure AI Projects** to answer any non-banking prompts.
 
-This mini project demonstrates:
-- Stateful **banking logic** (balance, login state, UPI PIN tries, transaction blocking)
-- **Command parsing** using regular expressions (Regex)
-- Integrating **Azure AI Projects** using **AzureCliCredential** (no API keys stored in code)
+It also supports natural language such as:
+- “how much money i have?”
+- “top up to 2000”
+- “if my balance is below 2000 deposit money and make it 2000”
 
 ---
 
 ## Features
 
-### Banking
-- Login (fixed demo credentials)
-- Check balance
+### Banking (rule-based + safe execution)
+- Login with demo credentials
+- Check balance (supports natural language)
 - Deposit/Add money (requires UPI PIN)
-- Withdraw money (requires UPI PIN and sufficient balance)
+- Withdraw money (requires UPI PIN)
 - Logout
-- UPI PIN security rules:
-  - PIN must be exactly **4 digits**
+- UPI PIN rules:
+  - Must be exactly **4 digits**
   - **3 tries** allowed
-  - After 3 failed PIN attempts, **transactions are blocked**
+  - After 3 wrong PIN attempts, transactions are blocked
+
+### Smart “Top-up to target” behavior
+Understands requests like:
+- “top up to 2000”
+- “if my balance is below 2000 make it 2000”
+- “if balance is less than 2000 deposit and make it 2000”
+
+It deposits only the **difference** needed to reach the target amount.
 
 ### AI fallback (Azure AI Agent)
-If the input is not recognized as a banking command, the app forwards the message to the configured Azure AI agent and prints the response.
+If the input is not recognized as a banking request, the message is sent to the Azure AI agent (configured endpoint + model) and the response is shown.
 
 ---
 
-## Command Reference
-
-Supported commands:
+## Supported Commands
 
 - `login <username> <password>`
 - `balance`
-- `deposit <amount> [pin <1234>]`
-- `add <amount> [pin <1234>]` (alias for deposit)
+- `deposit/add <amount> [pin <1234>]`
 - `withdraw <amount> [pin <1234>]`
 - `logout`
 - `exit`
 
-### Examples
+---
+
+## Natural Language Examples
 
 ```text
+You: how much money i have?
+Bank Bot: Not logged in. Please login first.
+
 You: login admin Admin@123
 Bank Bot: Login successful.
 
-You: balance
+You: how much money i have?
 Bank Bot: Current balance: 1000.
 
-You: deposit 500 pin 1234
-Bank Bot: Amount added successfully. New balance: 1500.
-
-You: withdraw 200
+You: if my balance is below 2000 deposit money and make it 2000
 UPI PIN (4 digits): 1234
-Bank Bot: Withdrawal successful. New balance: 1300.
-
-You: logout
-Bank Bot: Logged out.
-
-You: exit
+Bank Bot: Amount added successfully. New balance: 2000.
 ```
 
 ---
 
-## Configuration (No secrets in code)
+## Logic (How Bank Bot Works)
 
-This project **does not hardcode API keys**. It uses `AzureCliCredential`, which authenticates via your local Azure CLI login.
+This project uses a **hybrid approach**:
 
-You must configure the Azure AI Project endpoint (and optionally the model) using **environment variables**.
+### 1) Input loop
+- The console reads one line at a time.
+- `exit` stops the program.
+- Everything else is processed as either:
+  - a **banking request**, or
+  - a **general prompt** (sent to Azure AI).
 
-### Required environment variable
+### 2) Banking command detection (Regex + simple natural language)
+The app tries to match the user’s message against known banking intents:
 
-- `AZURE_AI_PROJECT_ENDPOINT`  
-  Example format:
-  `https://<your-resource>.services.ai.azure.com/api/projects/<your-project>`
+**A) Login**
+- Pattern: `login <username> <password>`
+- Tracks failed attempts (`_loginAttempts`)
+- After 3 failed attempts, login is denied.
 
-### Optional environment variable
+**B) Balance**
+- Detects words like: `balance`, `money`, `funds`
+- Detects question-like words like: `how much`, `what`, `show`, `tell`, `current`
+- Calls `CheckBalance()` (requires login).
 
-- `AZURE_AI_MODEL`  
-  Default: `gpt-4.1-nano`
+**C) Deposit**
+- Detects deposit verbs: `deposit`, `add`, `credit`, `top up`, `put in`
+- Extracts the first positive integer as the amount (example: 500)
+- PIN handling:
+  - If PIN is present in the text (`pin 1234`, `upi 1234`), it uses it
+  - Otherwise it prompts in console for the PIN
+
+**D) Withdraw**
+- Detects withdraw verbs: `withdraw`, `take out`, `debit`, `remove`
+- Extracts the first positive integer as the amount
+- PIN handling same as deposit
+
+### 3) “Top-up to target” logic (fix for “make it 2000”)
+When the user asks to make the balance reach a target **only if below** a value (example: 2000), the bot:
+1. Reads current balance (requires login)
+2. If `current >= target`: no deposit is performed
+3. If `current < target`:
+   - Calculates: `depositNeeded = target - current`
+   - Deposits exactly `depositNeeded`
+
+This prevents incorrect behavior like depositing the full target amount (which would overshoot).
+
+### 4) UPI PIN security logic
+For deposit/withdraw:
+- PIN must be **exactly 4 digits**
+- If PIN is wrong:
+  - tries reduce from 3 → 2 → 1 → 0
+  - after 0, transactions are blocked (`_transactionsBlocked = true`)
+- On correct PIN, tries reset back to 3
+
+### 5) AI fallback logic
+If the app cannot confidently match a banking intent, it forwards the message to Azure AI:
+- `agent.RunAsync(userText, session)`
+This is used for:
+- general questions
+- prompts not related to banking actions
 
 ---
 
-## Setup
+## Configuration (No hardcoded endpoints or keys)
+
+This project **does not hardcode API keys or endpoints** in source code.
+
+It uses:
+- `AzureCliCredential()` for authentication (no key in code)
+- Environment variables for configuration
+
+### Required environment variable
+- `AZURE_AI_PROJECT_ENDPOINT`
+
+Example format:
+`https://<your-resource>.services.ai.azure.com/api/projects/<your-project>`
+
+### Optional environment variable
+- `AZURE_AI_MODEL`  
+Default: `gpt-4.1-nano`
+
+---
+
+## Setup & Run
 
 ### 1) Prerequisites
-- .NET SDK (recommended: .NET 8 or later)
+- .NET SDK (recommended: .NET 8+)
 - Azure CLI installed
 - Access to an Azure AI Project
 
-### 2) Azure login (used by AzureCliCredential)
+### 2) Login to Azure (required for AzureCliCredential)
 ```bash
 az login
 ```
 
 ### 3) Set environment variables
-
-#### Windows PowerShell
-```powershell
-$env:AZURE_AI_PROJECT_ENDPOINT="https://<your-resource>.services.ai.azure.com/api/projects/<your-project>"
-$env:AZURE_AI_MODEL="gpt-4.1-nano"
-```
 
 #### macOS / Linux (bash/zsh)
 ```bash
@@ -108,7 +168,13 @@ export AZURE_AI_PROJECT_ENDPOINT="https://<your-resource>.services.ai.azure.com/
 export AZURE_AI_MODEL="gpt-4.1-nano"
 ```
 
-### 4) Restore and run
+#### Windows PowerShell
+```powershell
+$env:AZURE_AI_PROJECT_ENDPOINT="https://<your-resource>.services.ai.azure.com/api/projects/<your-project>"
+$env:AZURE_AI_MODEL="gpt-4.1-nano"
+```
+
+### 4) Run
 ```bash
 dotnet restore
 dotnet run
@@ -116,87 +182,42 @@ dotnet run
 
 ---
 
-## How It Works (High-Level Flow)
-
-1. The app creates:
-   - A `BankTool_v2` instance (holds balance + login + UPI security state)
-   - An Azure AI agent session (`AgentSession`) for non-banking prompts
-
-2. The main loop:
-   - Reads user input
-   - If the input is a banking command, it executes locally
-   - Otherwise, it sends the message to the Azure AI agent
-
----
-
-## Code Overview
-
-### `BankTool_v2` (Banking logic)
-
-**State**
-- `_isLoggedIn` — whether the user is logged in
-- `_loginAttempts` — failed login attempts counter (max 3)
-- `_balance` — starts at `1000` (in-memory)
-- `_upiTriesLeft` — starts at `3`
-- `_transactionsBlocked` — becomes `true` after 3 wrong PIN attempts
-
-**Demo constants (for mini-project use only)**
-- Username: `admin`
-- Password: `Admin@123`
-- UPI PIN: `1234`
-
-**Key behaviors**
-- Balance check requires login
-- Deposit/withdraw require login + correct PIN + unblocked transactions
-- 3 wrong PIN attempts blocks transactions until app restart (current design)
-
-### `Program` (Console + parsing + AI)
-- Uses Regex to parse commands:
-  - `login <u> <p>`
-  - `logout`
-  - `balance`
-  - `deposit/add <amount> ...`
-  - `withdraw <amount> ...`
-- If no command matches, calls the Azure AI agent via `RunAsync`
-
----
-
 ## Security Notes (Important)
 
-This is a **learning / demo** project.
+This is a mini-project/demo.
 
-- The banking credentials and UPI PIN are intentionally **hardcoded demo values**.
-- Account data is stored **in memory** only (resets when the app restarts).
-- No encryption, no database, no real banking integration.
-
-Do **not** use this code as-is for real financial or production systems.
+- Demo banking credentials and UPI PIN are hardcoded for learning:
+  - Username: `admin`
+  - Password: `Admin@123`
+  - UPI PIN: `1234`
+- Balance is stored in memory and resets each run.
+- Do not use this code for real banking/production systems.
 
 ---
 
 ## Troubleshooting
 
-### `Missing environment variable: AZURE_AI_PROJECT_ENDPOINT`
-Set the required environment variable before running the app (see Configuration section).
+### Missing `AZURE_AI_PROJECT_ENDPOINT`
+You will see:
+- `Bank Bot: Missing environment variable AZURE_AI_PROJECT_ENDPOINT`
 
-### Azure CLI authentication issues
-- Ensure you ran `az login`
-- Ensure your Azure account has access to the target Azure AI Project
-- Try:
+Fix: set the environment variable and re-run.
+
+### Azure authentication issues
+- Run `az login`
+- Check account:
   ```bash
   az account show
   ```
 
 ---
 
-## Possible Improvements
-- Move demo banking credentials/UPI PIN to user registration + secure storage
-- Persist account and balance data in a database
-- Add PIN unblock / reset flow
-- Add unit tests for `BankTool_v2`
-- Use a proper command framework (e.g., `System.CommandLine`) instead of Regex
-- Improve input validation and error handling
+## Suggested Repo Names
+- `bank-bot-azure-ai`
+- `ai-bank-bot`
+- `bank-bot-console`
 
 ---
 
 ## License
-Add a license file (example: MIT) as `LICENSE`.
+Add your preferred license (example: MIT) as `LICENSE`.
