@@ -7,11 +7,10 @@ using Microsoft.Agents.AI;
 
 public sealed class BankTool_v2
 {
-    // Demo credentials (mini-project only)
     private const string CorrectUsername = "admin";
     private const string CorrectPassword = "Admin@123";
 
-    // Demo UPI PIN rules
+    // UPI PIN rules
     private const string CorrectUpiPin = "1234";
     private int _upiTriesLeft = 3;
     private bool _transactionsBlocked = false;
@@ -42,6 +41,13 @@ public sealed class BankTool_v2
     {
         EnsureLoggedIn();
         return $"Current balance: {_balance}.";
+    }
+
+    // Helpful for logic like "top up to X"
+    public int GetBalanceValueForLogic()
+    {
+        EnsureLoggedIn();
+        return _balance;
     }
 
     public string AddMoney(int amount, string upiPin)
@@ -92,7 +98,6 @@ public sealed class BankTool_v2
 
         if (upiPin == CorrectUpiPin)
         {
-            // Reset tries after a success:
             _upiTriesLeft = 3;
             return;
         }
@@ -114,12 +119,17 @@ public class Program
     {
         var bank = new BankTool_v2();
 
-        // Load Azure AI configuration from environment (no hardcoding)
+        // Read configuration from environment variables (no hardcoded endpoints/keys)
+        // Required:
+        //   AZURE_AI_PROJECT_ENDPOINT = https://<resource>.services.ai.azure.com/api/projects/<project>
+        // Optional:
+        //   AZURE_AI_MODEL = gpt-4.1-nano
         var endpoint = Environment.GetEnvironmentVariable("AZURE_AI_PROJECT_ENDPOINT");
         if (string.IsNullOrWhiteSpace(endpoint))
         {
-            Console.WriteLine("Bank Bot: Missing environment variable: AZURE_AI_PROJECT_ENDPOINT");
-            Console.WriteLine("Bank Bot: Set it to: https://<your-resource>.services.ai.azure.com/api/projects/<your-project>");
+            Console.WriteLine("Bank Bot: Missing environment variable AZURE_AI_PROJECT_ENDPOINT");
+            Console.WriteLine("Bank Bot: Example:");
+            Console.WriteLine("Bank Bot:   export AZURE_AI_PROJECT_ENDPOINT=\"https://<resource>.services.ai.azure.com/api/projects/<project>\"");
             return;
         }
 
@@ -127,6 +137,8 @@ public class Program
         if (string.IsNullOrWhiteSpace(model))
             model = "gpt-4.1-nano";
 
+        // Uses AzureCliCredential => no API keys in code.
+        // Make sure you ran: az login
         AIAgent agent = new AIProjectClient(
                 new Uri(endpoint),
                 new AzureCliCredential())
@@ -134,7 +146,8 @@ public class Program
                 model: model,
                 instructions: """
                 You are Bank Bot. Keep answers brief.
-                Commands supported:
+
+                Supported commands:
                 - login <username> <password>
                 - balance
                 - deposit/add <amount> [pin <1234>]
@@ -158,7 +171,7 @@ public class Program
 
             var you = Regex.Replace(youRaw, @"^\s*You:\s*", "", RegexOptions.IgnoreCase);
 
-            if (TryHandleBanking(you, bank, out var bankReply))
+            if (TryHandleBankingNatural(you, bank, out var bankReply))
             {
                 Console.WriteLine($"Bank Bot: {bankReply}");
                 continue;
@@ -169,16 +182,25 @@ public class Program
         }
     }
 
-    private static bool TryHandleBanking(string input, BankTool_v2 bank, out string reply)
+    private static bool TryHandleBankingNatural(string input, BankTool_v2 bank, out string reply)
     {
         reply = "";
         var text = input.Trim();
 
-        // login <u> <p>
-        var loginMatch = Regex.Match(text, @"^\s*login\s+(\S+)\s+(\S+)\s*$", RegexOptions.IgnoreCase);
+        // login (support incomplete "login")
+        var loginMatch = Regex.Match(text, @"^\s*login(?:\s+(\S+)\s+(\S+))?\s*$", RegexOptions.IgnoreCase);
         if (loginMatch.Success)
         {
-            reply = bank.Login(loginMatch.Groups[1].Value, loginMatch.Groups[2].Value);
+            var u = loginMatch.Groups[1].Value;
+            var p = loginMatch.Groups[2].Value;
+
+            if (string.IsNullOrWhiteSpace(u) || string.IsNullOrWhiteSpace(p))
+            {
+                reply = "Usage: login <username> <password>";
+                return true;
+            }
+
+            reply = bank.Login(u, p);
             return true;
         }
 
@@ -189,19 +211,52 @@ public class Program
             return true;
         }
 
-        // balance or "what is my balance"
-        if (Regex.IsMatch(text, @"\bbalance\b", RegexOptions.IgnoreCase) &&
-            !Regex.IsMatch(text, @"\b(add|deposit|withdraw|withdrow)\b", RegexOptions.IgnoreCase))
+        // Natural-language "top up to target if below target"
+        if (TryParseTopUpToTarget(text, out var targetAmount))
+        {
+            try
+            {
+                var current = bank.GetBalanceValueForLogic();
+
+                if (current >= targetAmount)
+                {
+                    reply = $"Your balance is already {current}, which is not below {targetAmount}. No deposit needed.";
+                    return true;
+                }
+
+                var depositNeeded = targetAmount - current;
+
+                var pin = ExtractPinIfPresent(text);
+                if (pin is null)
+                {
+                    Console.Write("UPI PIN (4 digits): ");
+                    pin = Console.ReadLine()?.Trim();
+                }
+
+                reply = bank.AddMoney(depositNeeded, pin!);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                reply = ex.Message;
+                return true;
+            }
+        }
+
+        // Balance: natural language
+        if (Regex.IsMatch(text, @"\b(balance|amount|money|funds)\b", RegexOptions.IgnoreCase) &&
+            Regex.IsMatch(text, @"\b(how\s*much|what|check|show|tell|current)\b", RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(text, @"^\s*balance\s*$", RegexOptions.IgnoreCase))
         {
             try { reply = bank.CheckBalance(); }
             catch (Exception ex) { reply = ex.Message; }
             return true;
         }
 
-        // deposit/add (natural language too)
-        if (Regex.IsMatch(text, @"\b(add|deposit)\b", RegexOptions.IgnoreCase))
+        // Deposit/add: natural language
+        if (Regex.IsMatch(text, @"\b(add|deposit|put\s+in|credit|top\s*up|recharge)\b", RegexOptions.IgnoreCase))
         {
-            if (!TryExtractFirstInt(text, out var amount))
+            if (!TryExtractFirstPositiveInt(text, out var amount))
             {
                 reply = "Tell me the amount to add (example: deposit 500).";
                 return true;
@@ -219,10 +274,10 @@ public class Program
             return true;
         }
 
-        // withdraw/withdrow
-        if (Regex.IsMatch(text, @"\b(withdraw|withdrow)\b", RegexOptions.IgnoreCase))
+        // Withdraw: natural language
+        if (Regex.IsMatch(text, @"\b(withdraw|withdrow|take\s*out|debit|remove)\b", RegexOptions.IgnoreCase))
         {
-            if (!TryExtractFirstInt(text, out var amount))
+            if (!TryExtractFirstPositiveInt(text, out var amount))
             {
                 reply = "Tell me the amount to withdraw (example: withdraw 200).";
                 return true;
@@ -240,14 +295,46 @@ public class Program
             return true;
         }
 
+        // If user explicitly tries to "set/make balance = X" without "top up" semantics, reject
+        if (Regex.IsMatch(text, @"\b(set|make|change|update)\b.*\bbalance\b", RegexOptions.IgnoreCase))
+        {
+            reply = "I can’t set balance directly. I can only deposit or withdraw. Try: deposit <amount> or withdraw <amount>.";
+            return true;
+        }
+
         return false;
     }
 
-    private static bool TryExtractFirstInt(string text, out int value)
+    private static bool TryParseTopUpToTarget(string text, out int targetAmount)
+    {
+        targetAmount = 0;
+
+        // Pattern 1: "top up to 2000" / "bring it to 2000" / "make it 2000"
+        var p1 = Regex.Match(text, @"\b(top\s*up\s*to|bring\s*(it)?\s*to|make\s*(it)?\s*)\s*(\d+)\b", RegexOptions.IgnoreCase);
+        if (p1.Success && int.TryParse(p1.Groups[3].Value, out targetAmount) && targetAmount > 0)
+            return true;
+
+        // Pattern 2: "if balance is below 2000 ... make it 2000"
+        if (Regex.IsMatch(text, @"\b(if\b.*\bbalance\b.*\b(below|less\s+than|under)\b)", RegexOptions.IgnoreCase) &&
+            Regex.IsMatch(text, @"\b(make|bring|top\s*up)\b", RegexOptions.IgnoreCase))
+        {
+            var allNums = Regex.Matches(text, @"\b(\d+)\b");
+            if (allNums.Count > 0)
+            {
+                var last = allNums[allNums.Count - 1].Groups[1].Value;
+                if (int.TryParse(last, out targetAmount) && targetAmount > 0)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryExtractFirstPositiveInt(string text, out int value)
     {
         value = 0;
-        var m = Regex.Match(text, @"(-?\d+)");
-        return m.Success && int.TryParse(m.Groups[1].Value, out value);
+        var m = Regex.Match(text, @"(\d+)");
+        return m.Success && int.TryParse(m.Groups[1].Value, out value) && value > 0;
     }
 
     // Supports: "pin 1234" OR "upi 1234" OR "upi pin 1234"
